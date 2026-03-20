@@ -1,0 +1,721 @@
+# ================= IMPORTS =================
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from tkinterdnd2 import DND_FILES, TkinterDnD
+from tkinter import ttk
+import pdfplumber
+import re
+import pandas as pd
+from collections import defaultdict
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+from openpyxl.drawing.image import Image
+from datetime import datetime
+import os
+import webbrowser
+import win32com.client
+import time
+import winsound
+import math
+
+LOGO_PATH = r"C:\Users\Krishna Raju S\OneDrive\Documents\Intership\Indo Tech Transformers\Fasteners Project\logo.png"
+
+# =================================================================================
+# WEIGHT LOOKUP TABLE
+# Format: { "MsizeXlength-COATING" : pcs_per_kg }
+#
+# RULES:
+#   1. ONLY verified HDG values are listed here.
+#   2. MAGNI, BLACK, SS, HT are NOT listed — they will show N/A in output.
+#   3. Only EVEN lengths are stored (X20, X30, X40...) because the
+#      rounding function converts odd lengths to even before lookup.
+#   4. To add a new coating later, simply add entries like:
+#        "M16X50-MAGNI": 27,
+#      and the code will automatically pick them up.
+# =================================================================================
+
+WEIGHT_TABLE = {
+    # ---- M4 ----
+    "M4X10-HDG" : 800,
+    "M4X12-HDG" : 750,
+    "M4X16-HDG" : 680,
+    "M4X20-HDG" : 620,
+
+    # ---- M5 ----
+    "M5X10-HDG" : 800,
+    "M5X16-HDG" : 680,
+    "M5X20-HDG" : 620,
+    "M5X30-HDG" : 500,
+    "M5X40-HDG" : 420,
+    "M5X60-HDG" : 300,
+
+    # ---- M6 ----
+    "M6X10-HDG" : 420,
+    "M6X16-HDG" : 350,
+    "M6X20-HDG" : 310,
+    "M6X30-HDG" : 245,
+    "M6X40-HDG" : 200,
+    "M6X50-HDG" : 170,
+    "M6X60-HDG" : 148,
+
+    # ---- M8 ----
+    "M8X16-HDG" : 200,
+    "M8X20-HDG" : 175,
+    "M8X30-HDG" : 136,
+    "M8X40-HDG" : 110,
+    "M8X50-HDG" : 92,
+    "M8X60-HDG" : 80,
+    "M8X80-HDG" : 62,
+
+    # ---- M10 ----
+    "M10X20-HDG" : 110,
+    "M10X30-HDG" : 95,
+    "M10X40-HDG" : 85,
+    "M10X50-HDG" : 75,
+    "M10X60-HDG" : 67,
+    "M10X70-HDG" : 60,
+    "M10X80-HDG" : 54,
+    "M10X100-HDG": 45,
+
+    # ---- M12 ----
+    "M12X20-HDG" : 78,
+    "M12X30-HDG" : 65,
+    "M12X40-HDG" : 58,
+    "M12X50-HDG" : 52,
+    "M12X60-HDG" : 46,
+    "M12X70-HDG" : 42,
+    "M12X80-HDG" : 38,
+    "M12X90-HDG" : 34,
+    "M12X100-HDG": 31,
+
+    # ---- M16 ----
+    "M16X20-HDG" : 44,
+    "M16X30-HDG" : 37,
+    "M16X40-HDG" : 32,
+    "M16X50-HDG" : 28,
+    "M16X60-HDG" : 25,
+    "M16X70-HDG" : 22,
+    "M16X80-HDG" : 20,
+    "M16X90-HDG" : 18,
+    "M16X100-HDG": 17,
+    "M16X120-HDG": 15,
+    "M16X130-HDG": 14,
+
+    # ---- M20 ----
+    "M20X30-HDG" : 22,
+    "M20X40-HDG" : 18,
+    "M20X50-HDG" : 16,
+    "M20X60-HDG" : 14,
+    "M20X70-HDG" : 12,
+    "M20X80-HDG" : 11,
+    "M20X100-HDG": 9,
+    "M20X120-HDG": 8,
+
+    # ---- M24 ----
+    "M24X50-HDG" : 9,
+    "M24X60-HDG" : 9,
+    "M24X70-HDG" : 8,
+    "M24X80-HDG" : 7,
+    "M24X90-HDG" : 6,
+    "M24X100-HDG": 6,
+    "M24X120-HDG": 5,
+
+    # ---- M30 ----
+    "M30X60-HDG" : 5,
+    "M30X80-HDG" : 4,
+    "M30X100-HDG": 3,
+    "M30X120-HDG": 3,
+    "M30X150-HDG": 2,
+
+    # ---- M36 ----
+    "M36X80-HDG" : 2,
+    "M36X100-HDG": 2,
+    "M36X120-HDG": 2,
+    "M36X150-HDG": 1,
+
+    # ==========================================================
+    # TO ADD MAGNI / BLACK / SS / HT LATER:
+    # Simply add entries like:
+    #   "M16X50-MAGNI": 27,
+    #   "M16X50-SS"   : 25,
+    # ==========================================================
+}
+
+
+# =================================================================================
+# ROUNDING FUNCTION
+# Odd lengths → round UP to nearest even 10
+# e.g.  X25 → X30,  X35 → X40,  X45 → X50,  X55 → X60,  X65 → X70
+# =================================================================================
+
+def round_length(length_str):
+    """Round odd bolt lengths up to nearest 10."""
+    try:
+        length = int(length_str)
+        return math.ceil(length / 10) * 10
+    except:
+        return None
+
+
+# =================================================================================
+# WEIGHT LOOKUP FUNCTION
+# NO fake proxy for MAGNI. If coating not in table → N/A
+# =================================================================================
+
+def get_weight_info(size_material: str, qty: int):
+    """
+    Looks up pcs/kg for a given fastener key and calculates total weight.
+    Returns (pcs_per_kg, total_weight_kg) or ("N/A", "N/A") if not found.
+    MAGNI, BLACK, SS, HT will return N/A unless explicitly added to WEIGHT_TABLE.
+    """
+    key = size_material.upper().strip()
+
+    # Strip stud prefix  e.g. "S-M16X50-HDG" → "M16X50-HDG"
+    key = re.sub(r"^S-", "", key)
+
+    # Apply rounding to the length portion
+    # e.g. M12X55-HDG → M12X60-HDG
+    m = re.match(r"(M\d+)X(\d+)(-[A-Z]+)", key)
+    if m:
+        size    = m.group(1)          # e.g. M12
+        length  = m.group(2)          # e.g. 55
+        coating = m.group(3)          # e.g. -HDG
+        rounded = round_length(length)
+        if rounded is None:
+            return ("N/A", "N/A")
+        key = f"{size}X{rounded}{coating}"
+
+    pcs_per_kg = WEIGHT_TABLE.get(key, None)
+
+    if pcs_per_kg is None:
+        return ("N/A", "N/A")
+
+    total_weight = round(qty / pcs_per_kg, 2)
+    return (pcs_per_kg, total_weight)
+
+
+# =================================================================================
+# ROUNDING HELPER FOR DISPLAY IN OUTPUT TABLE
+# The displayed size in bolt/stud table should also show the ROUNDED length
+# e.g. input M12X55-HDG → displayed as M12X60-HDG in output
+# =================================================================================
+
+def round_size_material(size_material: str) -> str:
+    """Return the size_material with length rounded to nearest 10.
+    Also converts coating to SS for sizes below M10 (M4, M5, M6, M8)."""
+    key = size_material.upper().strip()
+    prefix = ""
+    if key.startswith("S-"):
+        prefix = "S-"
+        key = key[2:]
+    m = re.match(r"(M\d+)X(\d+)(-[A-Z]+)", key)
+    if m:
+        size    = m.group(1)
+        length  = m.group(2)
+        coating = m.group(3)
+        size_num = int(re.search(r"\d+", size).group())
+        if size_num < 10:
+            coating = "-SS"
+        rounded = round_length(length)
+        if rounded:
+            return f"{prefix}{size}X{rounded}{coating}"
+    return size_material
+
+
+def is_below_m10(size_material: str) -> bool:
+    """Returns True if fastener diameter is below M10 (M4, M5, M6, M8)."""
+    key = re.sub(r"^S-", "", size_material.upper().strip())
+    m = re.search(r"M(\d+)", key)
+    if m:
+        return int(m.group(1)) < 10
+    return False
+
+
+# ================= PDF READ =================
+def extract_pdf_lines(file_path):
+    lines = []
+    with pdfplumber.open(file_path) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if text:
+                lines.extend(text.split("\n"))
+    return lines
+
+
+# ================= HEADER =================
+def extract_header_info(lines):
+    header = {"WORK_ORDER": "", "REVISION": "", "CUSTOMER": "", "RATING": ""}
+    for line in lines:
+        u = line.upper()
+        if "WORK ORDER" in u:
+            m = re.search(r"WORK ORDER\s+(\d+)", u)
+            if m:
+                header["WORK_ORDER"] = m.group(1)
+        if "REVISION" in u:
+            m = re.search(r"REVISION\s+([A-Z0-9]+)", u)
+            if m:
+                header["REVISION"] = m.group(1)
+        if "CUSTOMER" in u:
+            # PDF extracts as "CUSTOMERM/S. ABN..." (no space) or "CUSTOMER M/S. ABN..."
+            m = re.search(r"CUSTOMER\s*(.*)", line, re.IGNORECASE)
+            if m:
+                name = m.group(1).strip()
+                if name:
+                    header["CUSTOMER"] = name
+        if "RATING" in u:
+            match = re.search(r"RATING\s*(.*?MVA.*?kV)", line, re.IGNORECASE)
+            if match:
+                header["RATING"] = match.group(1).strip()
+    return header
+
+
+# ================= HARDWARE PARSER =================
+def parse_hardware(lines):
+    data = []
+    for line in lines:
+        if re.search(r"(BOLT|STUD|SCREW)", line.upper()) and re.search(r"M\d+X\d+", line.upper()):
+            parts = line.split()
+            for i, part in enumerate(parts):
+                if re.match(r"S?-?M\d+X\d+-?[A-Z]*", part.upper()):
+                    try:
+                        # Treat SCREW same as BOLT
+                        fastener = parts[i - 1].upper()
+                        if fastener == "SCREW":
+                            fastener = "BOLT"
+                        data.append({
+                            "FASTENER"     : fastener,
+                            "SIZE_MATERIAL": part.upper(),
+                            "QTY"          : int(parts[i + 1]),
+                            "NUT"          : int(parts[i + 2]),
+                            "L_NUT"        : int(parts[i + 3]),
+                            "P_WASHER"     : int(parts[i + 4]),
+                            "S_WASHER"     : int(parts[i + 5])
+                        })
+                    except:
+                        continue
+    return pd.DataFrame(data)
+
+
+# ================= SUMMARY =================
+def build_summary(df):
+    summary = defaultdict(lambda: {
+        "FULL_NUT": 0, "LOCK_NUT": 0,
+        "PLAIN_WASHER": 0, "SPRING_WASHER": 0
+    })
+    unknown_materials = set()
+
+    for _, row in df.iterrows():
+        size_match = re.search(r"M\d+", row["SIZE_MATERIAL"].upper())
+        if not size_match:
+            continue
+        size     = size_match.group(0)
+        material = "HDG"
+
+        material_match = re.search(r"-([A-Z]+)$", row["SIZE_MATERIAL"].upper())
+        if material_match:
+            extracted = material_match.group(1)
+            if extracted in ["HDG", "MAGNI"]:
+                material = extracted
+            else:
+                unknown_materials.add(extracted)
+        else:
+            unknown_materials.add("UNKNOWN")
+
+        key = (size, material)
+        summary[key]["FULL_NUT"]     += row["NUT"]
+        summary[key]["LOCK_NUT"]     += row["L_NUT"]
+        summary[key]["PLAIN_WASHER"] += row["P_WASHER"]
+        summary[key]["SPRING_WASHER"]+= row["S_WASHER"]
+
+    return summary, unknown_materials
+
+
+# ================= EXPORT =================
+def export_excel(header, df, summary, open_after):
+
+    work_order = header["WORK_ORDER"] if header["WORK_ORDER"] else "UNKNOWN"
+
+    base_path = filedialog.askdirectory(title="Select Location to Save Output Folder")
+    if not base_path:
+        return
+
+    folder_name = f"{work_order}_Hardware_Output"
+    folder_path = os.path.join(base_path, folder_name)
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path)
+
+    excel_path = os.path.join(folder_path, f"Hardware_Output_{work_order}.xlsx")
+    pdf_path   = os.path.join(folder_path, f"Hardware_Output_{work_order}.pdf")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "HARDWARE LIST"
+
+    bold   = Font(bold=True)
+    center = Alignment(horizontal="center", vertical="center")
+    thin   = Border(left=Side(style="thin"),   right=Side(style="thin"),
+                    top=Side(style="thin"),    bottom=Side(style="thin"))
+    thick  = Border(left=Side(style="medium"), right=Side(style="medium"),
+                    top=Side(style="medium"),  bottom=Side(style="medium"))
+
+    ws.column_dimensions["A"].width = 26
+    ws.column_dimensions["B"].width = 16
+    ws.column_dimensions["C"].width = 16
+    ws.column_dimensions["D"].width = 20
+    ws.column_dimensions["E"].width = 14
+    ws.column_dimensions["F"].width = 14
+    ws.column_dimensions["G"].width = 14
+
+    # ===== HEADER =====
+    ws.merge_cells("A1:B3")
+    ws.merge_cells("C1:E3")
+    try:
+        img = Image(LOGO_PATH)
+        img.width  = 240
+        img.height = 55
+        ws.add_image(img, "A1")
+    except:
+        pass
+
+    ws["C1"] = "HARDWARE LIST (FINAL QUANTITY)"
+    ws["C1"].font      = Font(size=15, bold=True)
+    ws["C1"].alignment = center
+    ws["F1"] = "FORMAT NO"; ws["G1"] = "F/DSN/54"
+    ws["F2"] = "Version";   ws["G2"] = "1.3"
+    ws["F3"] = "DATE";      ws["G3"] = datetime.now().strftime("%d.%m.%y")
+    for r in ws["A1:G3"]:
+        for c in r:
+            c.border    = thick
+            c.alignment = center
+
+    # ===== PROJECT DETAILS =====
+    ws["A4"] = "WORK ORDER"; ws["B4"] = header["WORK_ORDER"]
+    ws["A5"] = "REVISION";   ws["B5"] = header["REVISION"]
+    ws["C4"] = "CUSTOMER";   ws["D4"] = header["CUSTOMER"]
+    ws["C5"] = "RATING";     ws["D5"] = header["RATING"]
+    for r in ws["A4:G5"]:
+        for c in r:
+            c.border    = thin
+            c.alignment = center
+
+    row = 7
+
+    # ===== SUMMARY =====
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7)
+    ws.cell(row=row, column=1, value="SUMMARY").font      = Font(size=14, bold=True)
+    ws.cell(row=row, column=1).alignment = center
+    row += 1
+
+    for col, head in enumerate(["SIZE","FULL NUT","LOCK NUT","PLAIN WASHER","MATERIAL","SPRING WASHER-SS"], 1):
+        c = ws.cell(row=row, column=col, value=head)
+        c.font = bold; c.border = thick; c.alignment = center
+    row += 1
+
+    for (size, material), values in sorted(summary.items()):
+        ws.row_dimensions[row].height = 18
+        ws.cell(row=row, column=1, value=size).alignment           = center
+        ws.cell(row=row, column=2, value=values["FULL_NUT"]).alignment   = center
+        ws.cell(row=row, column=3, value=values["LOCK_NUT"]).alignment   = center
+        ws.cell(row=row, column=4, value=values["PLAIN_WASHER"]).alignment = center
+        ws.cell(row=row, column=5, value=material).alignment       = center
+        ws.cell(row=row, column=6, value=values["SPRING_WASHER"]).alignment = center
+        for col in range(1, 7):
+            ws.cell(row=row, column=col).border = thin
+        row += 1
+
+    row += 2
+
+    # =================================================================
+    # BOLT TABLE
+    # Step 1: Round the size_material length to nearest 10
+    # Step 2: Group by rounded size_material and sum qty
+    # Step 3: Display with PCS/KG and TOTAL WEIGHT columns
+    # =================================================================
+
+    for col, head in enumerate(["BOLT SIZE AND MATERIAL","BOLT QUANTITY","PCS / KG","TOTAL WEIGHT (KG)"], 1):
+        c = ws.cell(row=row, column=col, value=head)
+        c.font = Font(bold=True); c.border = thick; c.alignment = center
+    row += 1
+
+    # Round and group bolts
+    bolt_df = df[df["FASTENER"].str.contains("BOLT", na=False)].copy()
+    bolt_df["ROUNDED_SIZE"] = bolt_df["SIZE_MATERIAL"].apply(round_size_material)
+    bolt_group = bolt_df.groupby("ROUNDED_SIZE")["QTY"].sum().reset_index()
+    bolt_group = bolt_group.sort_values("ROUNDED_SIZE")
+
+    for _, brow in bolt_group.iterrows():
+        size_mat = brow["ROUNDED_SIZE"]
+        qty      = int(brow["QTY"])
+
+        if is_below_m10(size_mat):
+            # Below M10 = SS coating — no weight data available
+            pcs_per_kg   = "N/A"
+            total_weight = "N/A"
+        else:
+            pcs_per_kg, total_weight = get_weight_info(size_mat, qty)
+
+        ws.cell(row=row, column=1, value=size_mat).alignment     = center
+        ws.cell(row=row, column=2, value=qty).alignment          = center
+        ws.cell(row=row, column=3, value=pcs_per_kg).alignment   = center
+        ws.cell(row=row, column=4, value=total_weight).alignment = center
+        for col in range(1, 5):
+            ws.cell(row=row, column=col).border = thin
+        row += 1
+
+    row += 2
+
+    # =================================================================
+    # STUD TABLE
+    # Same rounding and grouping logic as bolts
+    # =================================================================
+
+    for col, head in enumerate(["STUD SIZE AND MATERIAL","STUD QUANTITY","PCS / KG","TOTAL WEIGHT (KG)"], 1):
+        c = ws.cell(row=row, column=col, value=head)
+        c.font = Font(bold=True); c.border = thick; c.alignment = center
+    row += 1
+
+    stud_df = df[df["FASTENER"].str.contains("STUD", na=False)].copy()
+    stud_df["ROUNDED_SIZE"] = stud_df["SIZE_MATERIAL"].apply(round_size_material)
+    stud_group = stud_df.groupby("ROUNDED_SIZE")["QTY"].sum().reset_index()
+    stud_group = stud_group.sort_values("ROUNDED_SIZE")
+
+    for _, srow in stud_group.iterrows():
+        size_mat = srow["ROUNDED_SIZE"]
+        qty      = int(srow["QTY"])
+
+        if is_below_m10(size_mat):
+            # Below M10 = SS coating — no weight data available
+            pcs_per_kg   = "N/A"
+            total_weight = "N/A"
+        else:
+            pcs_per_kg, total_weight = get_weight_info(size_mat, qty)
+
+        ws.cell(row=row, column=1, value=size_mat).alignment     = center
+        ws.cell(row=row, column=2, value=qty).alignment          = center
+        ws.cell(row=row, column=3, value=pcs_per_kg).alignment   = center
+        ws.cell(row=row, column=4, value=total_weight).alignment = center
+        for col in range(1, 5):
+            ws.cell(row=row, column=col).border = thin
+        row += 1
+
+    # ===== APPROVAL FOOTER =====
+    row += 2
+    green_fill = PatternFill(start_color="C4D79B", end_color="C4D79B", fill_type="solid")
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7)
+    for col in range(1, 8):
+        ws.cell(row=row, column=col).fill = green_fill
+
+    row += 2
+    ws.cell(row=row, column=1, value="PREPARED").alignment = center
+    ws.cell(row=row, column=4, value="CHECKED").alignment  = center
+    ws.cell(row=row, column=7, value="APPROVED").alignment = center
+    row += 1
+    ws.cell(row=row, column=1, value="RG").alignment = center
+    ws.cell(row=row, column=4, value="JN").alignment = center
+    ws.cell(row=row, column=7, value="JN").alignment = center
+
+    # ===== SAVE =====
+    wb.save(excel_path)
+
+    # ===== PDF EXPORT =====
+    excel = win32com.client.Dispatch("Excel.Application")
+    excel.Visible = False
+    wb_pdf = excel.Workbooks.Open(os.path.abspath(excel_path))
+    sheet  = wb_pdf.Worksheets(1)
+    sheet.Columns.AutoFit()
+    sheet.Rows.AutoFit()
+    sheet.PageSetup.Zoom           = False
+    sheet.PageSetup.FitToPagesWide = 1
+    sheet.PageSetup.FitToPagesTall = 1
+    sheet.PageSetup.LeftMargin     = excel.InchesToPoints(0.3)
+    sheet.PageSetup.RightMargin    = excel.InchesToPoints(0.3)
+    sheet.PageSetup.TopMargin      = excel.InchesToPoints(0.4)
+    sheet.PageSetup.BottomMargin   = excel.InchesToPoints(0.4)
+    sheet.ExportAsFixedFormat(0, os.path.abspath(pdf_path))
+    wb_pdf.Close(False)
+    excel.Quit()
+
+    if open_after:
+        webbrowser.open(pdf_path)
+
+
+# ================= SELECT FILE =================
+def select_file():
+    file_path = filedialog.askopenfilename(
+        title="Select PDF",
+        filetypes=[("PDF Files", "*.pdf")]
+    )
+    if not file_path:
+        return
+
+    lines  = extract_pdf_lines(file_path)
+    header = extract_header_info(lines)
+    df     = parse_hardware(lines)
+
+    if df.empty:
+        messagebox.showerror("Error", "No hardware data found.")
+        return
+
+    summary, unknown_materials = build_summary(df)
+
+    if unknown_materials:
+        messagebox.showwarning(
+            "Material Warning",
+            f"Unknown material detected:\n{', '.join(unknown_materials)}"
+        )
+
+    export_excel(header, df, summary, open_var.get())
+    messagebox.showinfo("Success", "Hardware Output Generated Successfully!")
+
+
+# ================= README =================
+README_FILE = "README.txt"
+
+def generate_readme():
+    content = """
+INDOTECH HARDWARE AUTOMATION PLATFORM
+======================================
+
+1) HOW TO USE
+--------------
+1. Click Select Hardware PDF.
+2. Choose PDF.
+3. Select output folder.
+4. Excel & PDF auto generated.
+
+2) IF APPLICATION FAILS
+-----------------------
+- Close already opened Excel file.
+- Ensure PDF is not scanned image.
+- Ensure Excel is installed.
+
+3) WEIGHT TABLE
+---------------
+Only HDG coating values are active.
+MAGNI, BLACK, SS, HT will show N/A until
+their values are added to WEIGHT_TABLE.
+
+To add MAGNI rates later, open the code and add:
+  "M16X50-MAGNI": 27,
+under the WEIGHT_TABLE section.
+
+4) ROUNDING RULE
+----------------
+Odd lengths (X25, X35, X45...) are automatically
+rounded up to nearest 10 (X30, X40, X50...).
+Output displays the rounded size.
+
+======================================
+IndoTech Internal Software
+======================================
+"""
+    with open(README_FILE, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+# ================= SPLASH =================
+def show_splash():
+    splash = tk.Tk()
+    splash.overrideredirect(True)
+    splash.geometry("600x300")
+    x = (splash.winfo_screenwidth() // 2) - 300
+    y = (splash.winfo_screenheight() // 2) - 150
+    splash.geometry(f"+{x}+{y}")
+    splash.configure(bg="#0F172A")
+    splash.attributes("-alpha", 0.0)
+
+    tk.Label(splash, text="INDOTECH",
+             font=("Segoe UI", 28, "bold"), fg="white", bg="#0F172A").pack(pady=(70, 10))
+    tk.Label(splash, text="Hardware Automation Platform",
+             font=("Segoe UI", 12), fg="#94A3B8", bg="#0F172A").pack()
+
+    progress = ttk.Progressbar(splash, orient="horizontal", mode="indeterminate", length=400)
+    progress.pack(pady=40)
+    progress.start(12)
+
+    for i in range(0, 11):
+        splash.attributes("-alpha", i * 0.1)
+        splash.update()
+        time.sleep(0.05)
+    try:
+        winsound.PlaySound("startup.wav", winsound.SND_ASYNC)
+    except:
+        pass
+    splash.after(2500, splash.destroy)
+    splash.mainloop()
+
+
+# ================= STARTUP =================
+generate_readme()
+show_splash()
+
+# ================= MAIN UI =================
+root = TkinterDnD.Tk()
+root.title("IndoTech Industrial Hardware Platform")
+root.geometry("1000x600")
+root.resizable(False, False)
+
+SIDEBAR_COLOR = "#0F172A"
+LIGHT_BG      = "#F1F5F9"
+ACCENT        = "#B00020"
+ACCENT_HOVER  = "#E53935"
+
+sidebar = tk.Frame(root, bg=SIDEBAR_COLOR, width=240)
+sidebar.pack(side="left", fill="y")
+sidebar.pack_propagate(False)
+
+tk.Label(sidebar, text="INDOTECH",
+         font=("Segoe UI", 18, "bold"), fg="white", bg=SIDEBAR_COLOR).pack(pady=(60, 10))
+tk.Label(sidebar, text="Hardware Automation Suite",
+         font=("Segoe UI", 9), fg="#94A3B8", bg=SIDEBAR_COLOR).pack()
+
+main_panel = tk.Frame(root, bg=LIGHT_BG)
+main_panel.pack(side="right", fill="both", expand=True)
+
+tk.Label(main_panel, text="HARDWARE LIST GENERATOR",
+         font=("Segoe UI", 24, "bold"), fg=ACCENT, bg=LIGHT_BG).pack(pady=(80, 20))
+
+progress = ttk.Progressbar(main_panel, mode="indeterminate", length=300)
+
+def start_loading():
+    progress.pack(pady=10)
+    progress.start(10)
+
+def stop_loading():
+    progress.stop()
+    progress.pack_forget()
+
+def process_with_loader():
+    start_loading()
+    root.after(200, run_backend)
+
+def run_backend():
+    try:
+        select_file()
+    finally:
+        stop_loading()
+
+def hover_in(e):  select_btn.configure(bg=ACCENT_HOVER)
+def hover_out(e): select_btn.configure(bg=ACCENT)
+
+select_btn = tk.Button(main_panel, text="Select Hardware PDF",
+                       command=process_with_loader,
+                       font=("Segoe UI", 14), bg=ACCENT, fg="white",
+                       relief="flat", width=26, height=2, cursor="hand2")
+select_btn.pack()
+select_btn.bind("<Enter>", hover_in)
+select_btn.bind("<Leave>", hover_out)
+
+open_var = tk.BooleanVar()
+tk.Checkbutton(main_panel, text="Open PDF after generation",
+               variable=open_var, bg=LIGHT_BG, font=("Segoe UI", 10)).pack(pady=20)
+
+def open_readme():
+    os.startfile(README_FILE)
+
+readme_label = tk.Label(main_panel, text="READ ME", fg="blue", bg=LIGHT_BG,
+                        cursor="hand2", font=("Segoe UI", 9, "underline"))
+readme_label.pack(side="bottom", pady=5)
+readme_label.bind("<Button-1>", lambda e: open_readme())
+
+root.mainloop()
